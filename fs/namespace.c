@@ -944,9 +944,17 @@ static void unpin_mountpoint(struct pinned_mountpoint *m)
 	}
 }
 
+static inline int __check_mnt(const struct mount *mnt,
+			      const struct mnt_namespace *mnt_ns)
+{
+	if (!mnt_ns)
+		mnt_ns = current->nsproxy->mnt_ns;
+	return mnt->mnt_ns == mnt_ns;
+}
+
 static inline int check_mnt(const struct mount *mnt)
 {
-	return mnt->mnt_ns == current->nsproxy->mnt_ns;
+	return __check_mnt(mnt, NULL);
 }
 
 static inline bool check_anonymous_mnt(struct mount *mnt)
@@ -3716,7 +3724,7 @@ static int do_move_mount_old(const struct path *path, const char *old_name)
  * add a mount into a namespace's mount tree
  */
 static int do_add_mount(struct mount *newmnt, const struct pinned_mountpoint *mp,
-			int mnt_flags)
+			int mnt_flags, struct mnt_namespace *mnt_ns)
 {
 	struct mount *parent = mp->parent;
 
@@ -3725,7 +3733,7 @@ static int do_add_mount(struct mount *newmnt, const struct pinned_mountpoint *mp
 
 	mnt_flags &= ~MNT_INTERNAL_FLAGS;
 
-	if (unlikely(!check_mnt(parent))) {
+	if (unlikely(!__check_mnt(parent, mnt_ns))) {
 		/* that's acceptable only for automounts done in private ns */
 		if (!(mnt_flags & MNT_SHRINKABLE))
 			return -EINVAL;
@@ -3775,7 +3783,8 @@ static int do_new_mount_fc(struct fs_context *fc, const struct path *mountpoint,
 	mnt_warn_timestamp_expiry(mountpoint, mnt);
 
 	LOCK_MOUNT(mp, mountpoint);
-	error = do_add_mount(real_mount(mnt), &mp, mnt_flags);
+	error = do_add_mount(real_mount(mnt), &mp, mnt_flags,
+			     fc->rootns ? fc->rootns->ns->mnt_ns : NULL);
 	if (!error)
 		retain_and_null_ptr(mnt); // consumed on success
 	return error;
@@ -3896,7 +3905,7 @@ int finish_automount(struct vfsmount *__m, const struct path *path)
 	if (mp.parent == ERR_PTR(-EBUSY))
 		return 0;
 
-	err = do_add_mount(mnt, &mp, path->mnt->mnt_flags | MNT_SHRINKABLE);
+	err = do_add_mount(mnt, &mp, path->mnt->mnt_flags | MNT_SHRINKABLE, NULL);
 	if (likely(!err))
 		retain_and_null_ptr(m);
 	return err;

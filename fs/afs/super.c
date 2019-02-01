@@ -598,6 +598,22 @@ error:
 	return ret;
 }
 
+static void afs_set_rootns(struct fs_context *fc)
+{
+	struct afs_fs_context *ctx = fc->fs_private;
+	struct afs_cell *cell;
+
+	afs_unuse_cell(ctx->cell, afs_cell_trace_unuse_set_rootns);
+	do_set_rootns(fc);
+	ctx->net = afs_net(fc->net_ns);
+
+	/* Default to the workstation cell. */
+	cell = afs_find_cell(ctx->net, NULL, 0, afs_cell_trace_get_set_rootns);
+	if (IS_ERR(cell))
+		cell = NULL;
+	ctx->cell = cell;
+}
+
 static void afs_free_fc(struct fs_context *fc)
 {
 	struct afs_fs_context *ctx = fc->fs_private;
@@ -612,6 +628,7 @@ static void afs_free_fc(struct fs_context *fc)
 static const struct fs_context_operations afs_context_ops = {
 	.free		= afs_free_fc,
 	.parse_param	= afs_parse_param,
+	.set_rootns	= afs_set_rootns,
 	.get_tree	= afs_get_tree,
 };
 

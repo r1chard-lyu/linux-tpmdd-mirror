@@ -16,6 +16,7 @@
 #include <linux/slab.h>
 #include <linux/magic.h>
 #include <linux/security.h>
+#include <linux/rootns.h>
 #include <linux/mnt_namespace.h>
 #include <linux/pid_namespace.h>
 #include <linux/user_namespace.h>
@@ -145,6 +146,45 @@ int vfs_parse_fs_param(struct fs_context *fc, struct fs_parameter *param)
 		      fc->fs_type->name, param->key);
 }
 EXPORT_SYMBOL(vfs_parse_fs_param);
+
+/**
+ * do_set_rootns - Helper to set rootns
+ * @fc: The fs_context to adjust
+ *
+ * Apply the namespace change associated with rootns.
+ * Keep this helper separate from vfs_set_rootns().
+ * Perform filesystem cleanup for old namespaces pinned by rootns before
+ * calling this helper.
+ *
+ * Do not change the user namespace because security checks use it.
+ */
+void do_set_rootns(struct fs_context *fc)
+{
+	put_net(fc->net_ns);
+	fc->net_ns = get_net(fc->rootns->ns->net_ns);
+}
+EXPORT_SYMBOL(do_set_rootns);
+
+/**
+ * vfs_set_rootns() - Set destination rootns for superblock creation
+ * @fc: Filesystem context to adjust
+ * @rootns: Root namespace whose namespaces should be targeted
+ *
+ * Call this before vfs_parse_fs_param(). If the filesystem provides
+ * ->set_rootns(), call do_set_rootns() after filesystem cleanup tied to
+ * previously selected namespaces.
+ */
+void vfs_set_rootns(struct fs_context *fc, struct rootns *rootns)
+{
+	if (rootns) {
+		put_rootns(fc->rootns);
+		fc->rootns = get_rootns(rootns);
+		if (fc->ops->set_rootns)
+			fc->ops->set_rootns(fc);
+		else
+			do_set_rootns(fc);
+	}
+}
 
 /**
  * vfs_parse_fs_qstr - Convenience function to just parse a string.
@@ -378,6 +418,8 @@ struct fs_context *vfs_dup_fs_context(struct fs_context *src_fc)
 	fc->source	= NULL;
 	fc->security	= NULL;
 	get_filesystem(fc->fs_type);
+	if (fc->rootns)
+		get_rootns(fc->rootns);
 	get_net(fc->net_ns);
 	get_user_ns(fc->user_ns);
 	get_cred(fc->cred);
@@ -501,6 +543,7 @@ void put_fs_context(struct fs_context *fc)
 	put_net(fc->net_ns);
 	put_user_ns(fc->user_ns);
 	put_cred(fc->cred);
+	put_rootns(fc->rootns);
 	put_fc_log(fc);
 	put_filesystem(fc->fs_type);
 	kfree(fc->source);
