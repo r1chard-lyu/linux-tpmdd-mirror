@@ -2498,6 +2498,7 @@ int count_mounts(struct mnt_namespace *ns, struct mount *mnt)
 enum mnt_tree_flags_t {
 	MNT_TREE_BENEATH = BIT(0),
 	MNT_TREE_PROPAGATION = BIT(1),
+	MNT_TREE_ROOTNS = BIT(2),
 };
 
 /**
@@ -3649,8 +3650,11 @@ static int do_move_mount(const struct path *old_path,
 	if (IS_ERR(mp.parent))
 		return PTR_ERR(mp.parent);
 
-	if (check_mnt(old)) {
-		/* if the source is in our namespace... */
+	if (flags & MNT_TREE_ROOTNS) {
+		if (!anon_ns_root(old))
+			return -EINVAL;
+	} else if (old->mnt_ns == mp.parent->mnt_ns) {
+		/* if the source is in the same namespace as the mountpoint... */
 		/* ... it should be detachable from parent */
 		if (!mnt_has_parent(old) || IS_MNT_LOCKED(old))
 			return -EINVAL;
@@ -4525,7 +4529,7 @@ SYSCALL_DEFINE3(fsmount, int, fs_fd, unsigned int, flags,
 		return FD_ADD((flags & FSMOUNT_CLOEXEC) ? O_CLOEXEC : 0,
 			      open_new_namespace(&new_path, MOUNT_COPY_NEW));
 
-	ns = alloc_mnt_ns(current->nsproxy->mnt_ns->user_ns, true);
+	ns = alloc_mnt_ns(fc->user_ns, true);
 	if (IS_ERR(ns))
 		return PTR_ERR(ns);
 	mnt = real_mount(new_path.mnt);
@@ -4566,6 +4570,125 @@ static inline int vfs_move_mount(const struct path *from_path,
 }
 
 /*
+ * Create a mount namespace for a rootns and set the root mount in it.
+ */
+static int set_rootns_root(struct path *path, int fd)
+{
+	struct mount *mnt = real_mount(path->mnt);
+	struct path rootns_root = {};
+	struct mnt_namespace *mnt_ns;
+	struct mnt_namespace *old_mnt_ns = NULL;
+	struct rootns *rootns;
+	bool root_replaced = false;
+	struct path old_root = {};
+	struct mount *p;
+	struct fd f;
+	int ret;
+
+	f = fdget(fd);
+	if (fd_empty(f))
+		return -EBADF;
+	ret = -EINVAL;
+	if (!is_rootns_file(fd_file(f)))
+		goto out_fd;
+
+	ret = -EBUSY;
+	rootns = fd_file(f)->private_data;
+	if (!ns_capable(rootns->cred->user_ns, CAP_SYS_ADMIN)) {
+		ret = -EPERM;
+		goto out_fd;
+	}
+	spin_lock(&rootns->members_lock);
+	if (rootns->fs_ready) {
+		spin_unlock(&rootns->members_lock);
+		goto out_fd;
+	}
+	rootns_root = rootns->root;
+	path_get(&rootns_root);
+	spin_unlock(&rootns->members_lock);
+
+	ret = security_move_mount(path, &rootns_root);
+	path_put(&rootns_root);
+	if (ret)
+		goto out_fd;
+
+	mnt_ns = alloc_mnt_ns(rootns->cred->user_ns, false);
+	if (IS_ERR(mnt_ns)) {
+		ret = PTR_ERR(mnt_ns);
+		goto out_fd;
+	}
+
+	ret = -EBUSY;
+	namespace_lock();
+	lock_mount_hash();
+	spin_lock(&rootns->members_lock);
+
+	ret = -EINVAL;
+	if (!path_mounted(path) || !d_is_dir(path->dentry))
+		goto out_unlock;
+	if (!anon_ns_root(mnt))
+		goto out_unlock;
+	if (!check_for_nsfs_mounts(mnt)) {
+		ret = -ELOOP;
+		goto out_unlock;
+	}
+
+	ret = -EBUSY;
+	if (!rootns->fs_ready) {
+		/* Obtain the namespace's ref: */
+		emptied_ns = mnt->mnt_ns;
+		for (p = mnt; p; p = next_mnt(p, mnt)) {
+			move_from_ns(p);
+			list_del(&p->mnt_list);
+		}
+
+		mnt_ns->root = mnt;
+		mnt_ns->nr_mounts = 0;
+		if (mnt->mnt_ns->user_ns != mnt_ns->user_ns)
+			lock_mnt_tree(mnt);
+
+		/* Give ref to namespace: */
+		for (p = mnt; p; p = next_mnt(p, mnt)) {
+			mnt_add_to_ns(mnt_ns, p);
+			mnt_ns->nr_mounts++;
+		}
+
+		rootns_tag_ns(rootns, &mnt_ns->ns);
+		ns_tree_add_raw(mnt_ns);
+		ns_ref_active_get(mnt_ns);
+		old_mnt_ns = rootns->ns->mnt_ns;
+		rootns->ns->mnt_ns = mnt_ns;
+		rootns->fs_ready = true;
+
+		path_get(path);
+		old_root = rootns->root;
+		rootns->root = *path;
+		root_replaced = true;
+
+		mnt_ns = NULL;
+		ret = 0;
+	}
+
+out_unlock:
+	spin_unlock(&rootns->members_lock);
+	unlock_mount_hash();
+	namespace_unlock();
+
+	if (root_replaced)
+		path_put(&old_root);
+
+	if (ret < 0)
+		put_mnt_ns(mnt_ns);
+	if (old_mnt_ns) {
+		ns_ref_active_put(old_mnt_ns);
+		put_mnt_ns(old_mnt_ns);
+	}
+out_fd:
+	fdput(f);
+	return ret;
+}
+
+/*
  * Move a mount from one place to another.  In combination with
  * fsopen()/fsmount() this is used to install a new mount and in combination
  * with open_tree(OPEN_TREE_CLONE [| AT_RECURSIVE]) it can be used to copy
@@ -4580,8 +4703,11 @@ SYSCALL_DEFINE5(move_mount,
 {
 	struct path to_path __free(path_put) = {};
 	struct path from_path __free(path_put) = {};
+	struct path rootns_root __free(path_put) = {};
 	unsigned int lflags, uflags;
 	enum mnt_tree_flags_t mflags = 0;
+	bool to_rootns = false;
+	char buf[2];
 	int ret = 0;
 
 	if (!may_mount())
@@ -4602,6 +4728,88 @@ SYSCALL_DEFINE5(move_mount,
 		uflags = AT_EMPTY_PATH;
 
 	CLASS(filename_maybe_null,to_name)(to_pathname, uflags);
+
+	uflags = 0;
+	if (flags & MOVE_MOUNT_F_EMPTY_PATH)
+		uflags = AT_EMPTY_PATH;
+
+	CLASS(filename_maybe_null, from_name)(from_pathname, uflags);
+
+	if (unlikely(flags & MOVE_MOUNT_T_ROOTNS_ROOT)) {
+		struct fd f;
+		struct rootns *rootns;
+
+		if (flags & MOVE_MOUNT_T_EMPTY_PATH)
+			return -EINVAL;
+		long nlen = strncpy_from_user(buf, to_pathname, 2);
+
+		if (nlen < 0)
+			return -EFAULT;
+		if (nlen < 1)
+			return -EINVAL;
+		if (buf[0] == '/' && buf[1] == '\0') {
+			/*
+			 * Set the root mount.
+			 * Replace this pathname form with a dedicated API.
+			 */
+			if (IS_ERR(from_name))
+				return PTR_ERR(from_name);
+
+			if (!from_name && from_dfd >= 0) {
+				CLASS(fd_raw, f_from)(from_dfd);
+				if (fd_empty(f_from))
+					return -EBADF;
+
+				from_path = fd_file(f_from)->f_path;
+				path_get(&from_path);
+			} else {
+				lflags = 0;
+				if (flags & MOVE_MOUNT_F_SYMLINKS)
+					lflags |= LOOKUP_FOLLOW;
+				if (flags & MOVE_MOUNT_F_AUTOMOUNTS)
+					lflags |= LOOKUP_AUTOMOUNT;
+				ret = filename_lookup(from_dfd, from_name, lflags,
+						      &from_path, NULL);
+				if (ret)
+					return ret;
+			}
+			return set_rootns_root(&from_path, to_dfd);
+		}
+
+		/* Validate the fd as a rootns handle.
+		 * The check is incomplete because another thread can
+		 * replace the fd before pathwalk lookup.
+		 */
+		if (buf[0] == '/')
+			return -EINVAL;
+		f = fdget(to_dfd);
+		if (fd_empty(f))
+			return -EBADF;
+		if (!is_rootns_file(fd_file(f))) {
+			fdput(f);
+			return -EINVAL;
+		}
+		rootns = fd_file(f)->private_data;
+		if (!ns_capable(rootns->cred->user_ns, CAP_SYS_ADMIN)) {
+			fdput(f);
+			return -EPERM;
+		}
+		spin_lock(&rootns->members_lock);
+		if (!rootns->fs_ready) {
+			spin_unlock(&rootns->members_lock);
+			fdput(f);
+			return -ENOENT;
+		}
+		rootns_root = rootns->root;
+		path_get(&rootns_root);
+		spin_unlock(&rootns->members_lock);
+		fdput(f);
+		mflags |= MNT_TREE_ROOTNS;
+		to_rootns = true;
+	}
+	if (IS_ERR(to_name))
+		return PTR_ERR(to_name);
+
 	if (!to_name && to_dfd >= 0) {
 		CLASS(fd_raw, f_to)(to_dfd);
 		if (fd_empty(f_to))
@@ -4615,7 +4823,15 @@ SYSCALL_DEFINE5(move_mount,
 			lflags |= LOOKUP_FOLLOW;
 		if (flags & MOVE_MOUNT_T_AUTOMOUNTS)
 			lflags |= LOOKUP_AUTOMOUNT;
-		ret = filename_lookup(to_dfd, to_name, lflags, &to_path, NULL);
+		if (to_rootns) {
+			if (!to_name)
+				return -EINVAL;
+			ret = vfs_path_lookup(rootns_root.dentry,
+					      rootns_root.mnt,
+					      to_name->name, lflags, &to_path);
+		} else {
+			ret = filename_lookup(to_dfd, to_name, lflags, &to_path, NULL);
+		}
 		if (ret)
 			return ret;
 	}
@@ -4624,7 +4840,6 @@ SYSCALL_DEFINE5(move_mount,
 	if (flags & MOVE_MOUNT_F_EMPTY_PATH)
 		uflags = AT_EMPTY_PATH;
 
-	CLASS(filename_maybe_null,from_name)(from_pathname, uflags);
 	if (!from_name && from_dfd >= 0) {
 		CLASS(fd_raw, f_from)(from_dfd);
 		if (fd_empty(f_from))
