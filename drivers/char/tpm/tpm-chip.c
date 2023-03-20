@@ -528,7 +528,7 @@ static bool tpm_amd_is_rng_defective(struct tpm_chip *chip)
 	if (!(chip->flags & TPM_CHIP_FLAG_TPM2))
 		return false;
 
-	ret = tpm_request_locality(chip);
+	ret = tpm_request_locality(chip, 0);
 	if (ret)
 		return false;
 
