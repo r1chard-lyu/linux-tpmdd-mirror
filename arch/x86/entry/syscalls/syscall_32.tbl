@@ -478,3 +478,4 @@
 470	i386	listns			sys_listns
 471	i386	rseq_slice_yield	sys_rseq_slice_yield
 472	i386	rootns_create		sys_rootns_create
+473	i386	rootns_wait		sys_rootns_wait		compat_sys_rootns_wait

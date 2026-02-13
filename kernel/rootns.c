@@ -404,3 +404,103 @@ SYSCALL_DEFINE1(rootns_create, unsigned int, flags)
 
 	return fd;
 }
+
+/*
+ * Wait for rootns init to exit and report results for the caller.
+ *
+ * Returns caller-visible init TGID on success, 0 for WNOHANG when still
+ * running, and -ECHILD when init pid is not visible in caller pidns.
+ */
+static long rootns_wait_common(int rootnsfd, unsigned int options,
+			       int *status, struct rusage *ru)
+{
+	long ret;
+	struct pid *init_pid;
+	struct rootns *rootns;
+	struct fd f = fdget(rootnsfd);
+	struct pid_namespace *pid_ns = task_active_pid_ns(current);
+
+	if (fd_empty(f))
+		return -EBADF;
+	ret = -EINVAL;
+	if (!is_rootns_file(fd_file(f)))
+		goto out;
+	if (options & ~WNOHANG)
+		goto out;
+
+	rootns = fd_file(f)->private_data;
+	if (!(options & WNOHANG)) {
+		ret = wait_event_killable(rootns->waitq,
+					  READ_ONCE(rootns->state) == ROOTNS_DEAD);
+		if (ret)
+			goto out;
+	} else if (READ_ONCE(rootns->state) != ROOTNS_DEAD) {
+		ret = 0;
+		goto out;
+	}
+
+	init_pid = READ_ONCE(rootns->init_pid);
+	if (!init_pid) {
+		ret = -ECHILD;
+		goto out;
+	}
+	ret = pid_nr_ns(init_pid, pid_ns);
+	if (ret <= 0) {
+		ret = -ECHILD;
+		goto out;
+	}
+
+	smp_rmb(); /* Pairs with the wmb in exit_rootns() */
+	if (status)
+		*status = READ_ONCE(rootns->exit_code);
+	if (ru)
+		*ru = rootns->rusage;
+
+out:
+	fdput(f);
+	return ret;
+}
+
+SYSCALL_DEFINE4(rootns_wait, int, rootnsfd, int __user *, status,
+		unsigned int, options, struct rusage __user *, ru)
+{
+	int code;
+	long ret;
+	struct rusage rusage;
+
+	ret = rootns_wait_common(rootnsfd, options,
+				 status ? &code : NULL,
+				 ru ? &rusage : NULL);
+	if (ret <= 0)
+		return ret;
+
+	if (status && put_user(code, status))
+		return -EFAULT;
+	if (ru && copy_to_user(ru, &rusage, sizeof(rusage)))
+		return -EFAULT;
+	return ret;
+}
+
+#ifdef CONFIG_COMPAT
+COMPAT_SYSCALL_DEFINE4(rootns_wait, int, rootnsfd,
+		       compat_int_t __user *, status,
+		       unsigned int, options,
+		       struct compat_rusage __user *, ru)
+{
+	int code;
+	long ret;
+	struct rusage rusage;
+
+	ret = rootns_wait_common(rootnsfd, options,
+				 status ? &code : NULL,
+				 ru ? &rusage : NULL);
+	if (ret <= 0)
+		return ret;
+
+	if (status && put_user(code, status))
+		return -EFAULT;
+	if (ru && put_compat_rusage(&rusage, ru))
+		return -EFAULT;
+	return ret;
+}
+#endif
