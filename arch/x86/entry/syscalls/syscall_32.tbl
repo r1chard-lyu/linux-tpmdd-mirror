@@ -480,3 +480,4 @@
 472	i386	rootns_create		sys_rootns_create
 473	i386	rootns_wait		sys_rootns_wait		compat_sys_rootns_wait
 474	i386	rootns_kill		sys_rootns_kill
+475	i386	rootns_enter		sys_rootns_enter

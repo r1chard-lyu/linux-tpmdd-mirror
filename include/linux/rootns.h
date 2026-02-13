@@ -18,6 +18,7 @@
 
 struct fs_struct;
 struct file;
+struct ns_common;
 struct nsproxy;
 struct pid;
 struct task_struct;
@@ -34,6 +35,7 @@ enum rootns_state {
  */
 struct rootns {
 	refcount_t		usage;
+	u64			id;
 	int			exit_code;	/* The exit code of 'init' */
 	struct rusage		rusage;		/* Resource usage of 'init' */
 	const struct cred	*cred;		/* Creds for this rootns, including userns */
@@ -61,6 +63,9 @@ bool is_rootns_file(struct file *file);
 int copy_rootns(unsigned long flags, struct task_struct *tsk,
 		struct rootns *rootns);
 void exit_rootns(struct task_struct *tsk);
+void rootns_tag_ns(struct rootns *rootns, struct ns_common *ns);
+void rootns_tag_nsproxy(struct rootns *rootns, struct nsproxy *ns, u64 flags);
+bool rootns_may_setns(struct rootns *rootns, struct ns_common *ns);
 #else
 static inline struct rootns *get_rootns(struct rootns *c)
 {
@@ -84,6 +89,21 @@ static inline int copy_rootns(unsigned long flags, struct task_struct *tsk,
 
 static inline void exit_rootns(struct task_struct *tsk)
 {
+}
+
+static inline void rootns_tag_ns(struct rootns *rootns, struct ns_common *ns)
+{
+}
+
+static inline void rootns_tag_nsproxy(struct rootns *rootns,
+				     struct nsproxy *ns, u64 flags)
+{
+}
+
+static inline bool rootns_may_setns(struct rootns *rootns,
+				    struct ns_common *ns)
+{
+	return true;
 }
 #endif /* CONFIG_ROOTNS */
 

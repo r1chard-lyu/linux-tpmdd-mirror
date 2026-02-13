@@ -1003,6 +1003,7 @@ asmlinkage long sys_rootns_create(unsigned int flags);
 asmlinkage long sys_rootns_wait(int rootnsfd, int __user *status,
 				unsigned int options, struct rusage __user *ru);
 asmlinkage long sys_rootns_kill(int rootnsfd, int sig);
+asmlinkage long sys_rootns_enter(int rootnsfd);
 
 /*
  * Architecture-specific system calls

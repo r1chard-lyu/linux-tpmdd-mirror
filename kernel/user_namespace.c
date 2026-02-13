@@ -22,6 +22,7 @@
 #include <linux/bsearch.h>
 #include <linux/sort.h>
 #include <linux/nstree.h>
+#include <linux/rootns.h>
 
 static struct kmem_cache *user_ns_cachep __ro_after_init;
 static DEFINE_MUTEX(userns_state_mutex);
@@ -187,8 +188,10 @@ int unshare_userns(unsigned long unshare_flags, struct cred **new_cred)
 		err = create_user_ns(cred);
 		if (err)
 			put_cred(cred);
-		else
+		else {
+			rootns_tag_ns(current->nsproxy->rootns, &cred->user_ns->ns);
 			*new_cred = cred;
+		}
 	}
 
 	return err;

@@ -18,11 +18,19 @@
 #include <linux/security.h>
 #include <linux/uaccess.h>
 #include <linux/mnt_namespace.h>
+#include <linux/utsname.h>
+#include <linux/ipc_namespace.h>
+#include <linux/time_namespace.h>
+#include <linux/cgroup_namespace.h>
 #include <linux/nsproxy.h>
 #include <linux/nsfs.h>
 #include <linux/pid.h>
 #include <linux/compat.h>
 #include <linux/rculist.h>
+#include <linux/atomic.h>
+#include <linux/ns_common.h>
+#include <linux/user_namespace.h>
+#include <net/net_namespace.h>
 #include <uapi/linux/rootns.h>
 
 #undef pr_fmt
@@ -40,6 +48,61 @@ struct rootns init_rootns = {
 	.state		= ROOTNS_RUNNING,
 	.members_lock	= __SPIN_LOCK_UNLOCKED(init_rootns.members_lock),
 };
+
+static atomic64_t rootns_id = ATOMIC64_INIT(0);
+
+void rootns_tag_ns(struct rootns *rootns, struct ns_common *ns)
+{
+	if (!rootns || rootns == &init_rootns || !ns)
+		return;
+
+	ns->rootns_id = rootns->id;
+}
+
+void rootns_tag_nsproxy(struct rootns *rootns, struct nsproxy *ns, u64 flags)
+{
+	if (!rootns || !ns)
+		return;
+
+	if (flags & CLONE_NEWNS)
+		rootns_tag_ns(rootns, &ns->mnt_ns->ns);
+#ifdef CONFIG_UTS_NS
+	if (flags & CLONE_NEWUTS)
+		rootns_tag_ns(rootns, &ns->uts_ns->ns);
+#endif
+#ifdef CONFIG_IPC_NS
+	if (flags & CLONE_NEWIPC)
+		rootns_tag_ns(rootns, &ns->ipc_ns->ns);
+#endif
+#ifdef CONFIG_PID_NS
+	if (flags & CLONE_NEWPID)
+		rootns_tag_ns(rootns, &ns->pid_ns_for_children->ns);
+#endif
+#ifdef CONFIG_CGROUPS
+	if (flags & CLONE_NEWCGROUP)
+		rootns_tag_ns(rootns, &ns->cgroup_ns->ns);
+#endif
+#ifdef CONFIG_NET_NS
+	if (flags & CLONE_NEWNET)
+		rootns_tag_ns(rootns, &ns->net_ns->ns);
+#endif
+#ifdef CONFIG_TIME_NS
+	if (flags & CLONE_NEWTIME)
+		rootns_tag_ns(rootns, &ns->time_ns_for_children->ns);
+#endif
+}
+
+bool rootns_may_setns(struct rootns *rootns, struct ns_common *ns)
+{
+	if (!ns)
+		return false;
+	if (!rootns || rootns == &init_rootns)
+		return true;
+	if (is_current_namespace(ns))
+		return true;
+
+	return ns->rootns_id == rootns->id;
+}
 
 /*
  * Get a reference to a rootns.
@@ -320,6 +383,7 @@ static struct rootns *create_rootns(unsigned int flags)
 		goto err_free_cont;
 
 	c->flags = flags;
+	c->id = atomic64_inc_return(&rootns_id);
 	c->fs_ready = false;
 
 	cred = create_rootns_creds(flags);
@@ -328,6 +392,8 @@ static struct rootns *create_rootns(unsigned int flags)
 		goto err_cont;
 	}
 	c->cred = cred;
+	if (flags & ROOTNS_USER)
+		rootns_tag_ns(c, &cred->user_ns->ns);
 
 	ret = -ENOMEM;
 	fs = copy_fs_struct(current->fs);
@@ -357,6 +423,7 @@ static struct rootns *create_rootns(unsigned int flags)
 
 	c->ns = ns;
 	ns->rootns = c;
+	rootns_tag_nsproxy(c, ns, clone_flags);
 	c->pid_ns = get_pid_ns(c->ns->pid_ns_for_children);
 	c->root = fs->root;
 	fs->root = (struct path){};
@@ -574,6 +641,47 @@ SYSCALL_DEFINE2(rootns_kill, int, rootnsfd, int, sig)
 	goto out;
 
 out:
+	fdput(f);
+	return ret;
+}
+
+/*
+ * Enter an existing rootns.
+ *
+ * The target rootns pid namespace must be visible from the caller's active
+ * pid namespace so the parent receives a usable pid return value.
+ */
+SYSCALL_DEFINE1(rootns_enter, int, rootnsfd)
+{
+	int ret;
+	struct rootns *rootns;
+	bool fs_ready;
+	struct fd f = fdget(rootnsfd);
+	struct kernel_clone_args args = {
+		.exit_signal = SIGCHLD,
+	};
+
+	if (fd_empty(f))
+		return -EBADF;
+	ret = -EINVAL;
+	if (is_rootns_file(fd_file(f))) {
+		rootns = fd_file(f)->private_data;
+
+		args.rootns = rootns;
+		spin_lock(&rootns->members_lock);
+		fs_ready = rootns->fs_ready;
+		spin_unlock(&rootns->members_lock);
+		if (!rootns->ns)
+			ret = -EOPNOTSUPP;
+		else if (!pidns_is_ancestor(rootns->pid_ns,
+					    task_active_pid_ns(current)))
+			ret = -EXDEV;
+		else if (!fs_ready)
+			ret = -ENOENT;
+		else
+			ret = kernel_clone(&args);
+	}
+
 	fdput(f);
 	return ret;
 }

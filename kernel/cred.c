@@ -15,10 +15,13 @@
 #include <linux/key.h>
 #include <linux/keyctl.h>
 #include <linux/init_task.h>
+#include <linux/nsproxy.h>
+#include <linux/rootns.h>
 #include <linux/security.h>
 #include <linux/binfmts.h>
 #include <linux/cn_proc.h>
 #include <linux/uidgid.h>
+#include <linux/user_namespace.h>
 
 #if 0
 #define kdebug(FMT, ...)						\
@@ -252,6 +255,49 @@ struct cred *prepare_exec_creds(void)
 }
 
 /*
+ * Handle forking a process into a rootns.
+ */
+static struct cred *prepare_rootns_creds(struct rootns *rootns)
+{
+	struct cred *new;
+
+	new = kmem_cache_alloc(cred_jar, GFP_KERNEL);
+	if (!new)
+		return NULL;
+
+	kdebug("prepare_creds() alloc %p", new);
+
+	memcpy(new, rootns->cred, sizeof(struct cred));
+	new->non_rcu = 0;
+#ifdef CONFIG_SECURITY
+	new->security = NULL;
+#endif
+
+	atomic_long_set(&new->usage, 1);
+	get_group_info(new->group_info);
+	get_uid(new->user);
+	get_user_ns(new->user_ns);
+	new->ucounts = get_ucounts(new->ucounts);
+	if (!new->ucounts)
+		goto error;
+
+#ifdef CONFIG_KEYS
+	key_get(new->session_keyring);
+	key_get(new->process_keyring);
+	key_get(new->thread_keyring);
+	key_get(new->request_key_auth);
+#endif
+
+	if (security_prepare_creds(new, rootns->cred, GFP_KERNEL_ACCOUNT) < 0)
+		goto error;
+	return new;
+
+error:
+	abort_creds(new);
+	return NULL;
+}
+
+/*
  * Copy credentials for the new process created by fork()
  *
  * We share if we can, but under some circumstances we have to generate a new
@@ -260,15 +306,16 @@ struct cred *prepare_exec_creds(void)
  * The new process gets the current process's subjective credentials as its
  * objective and subjective credentials
  */
-int copy_creds(struct task_struct *p, u64 clone_flags)
+int copy_creds(struct task_struct *p, u64 clone_flags,
+	       struct rootns *rootns)
 {
+	struct rootns *cred_rootns;
 	struct cred *new;
 	int ret;
 
 #ifdef CONFIG_KEYS_REQUEST_CACHE
 	p->cached_requested_key = NULL;
 #endif
-
 	if (
 #ifdef CONFIG_KEYS
 		!p->cred->thread_keyring &&
@@ -283,7 +330,10 @@ int copy_creds(struct task_struct *p, u64 clone_flags)
 		return 0;
 	}
 
-	new = prepare_creds();
+	if (rootns)
+		new = prepare_rootns_creds(rootns);
+	else
+		new = prepare_creds();
 	if (!new)
 		return -ENOMEM;
 
@@ -291,6 +341,10 @@ int copy_creds(struct task_struct *p, u64 clone_flags)
 		ret = create_user_ns(new);
 		if (ret < 0)
 			goto error_put;
+		cred_rootns = rootns;
+		if (!cred_rootns)
+			cred_rootns = current->nsproxy->rootns;
+		rootns_tag_ns(cred_rootns, &new->user_ns->ns);
 		ret = set_cred_ucounts(new);
 		if (ret < 0)
 			goto error_put;

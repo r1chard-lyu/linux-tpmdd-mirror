@@ -147,6 +147,7 @@ struct nsproxy *create_new_namespaces(u64 flags,
 	}
 	new_nsp->time_ns = get_time_ns(ns->time_ns);
 	new_nsp->rootns = ns->rootns;
+	rootns_tag_nsproxy(new_nsp->rootns, new_nsp, flags);
 
 	return new_nsp;
 
@@ -170,13 +171,21 @@ out_ns:
 /*
  * called from clone.  This now handles copy for nsproxy and all
  * namespaces therein.
+ *
+ * Namespaces derived from a rootns member inherit the same rootns domain.
  */
-int copy_namespaces(u64 flags, struct task_struct *tsk)
+int copy_namespaces(u64 flags, struct task_struct *tsk,
+		    struct rootns *rootns)
 {
 	struct nsproxy *old_ns = tsk->nsproxy;
 	struct user_namespace *user_ns = task_cred_xxx(tsk, user_ns);
 	struct nsproxy *new_ns;
 
+	if (rootns) {
+		get_nsproxy(rootns->ns);
+		tsk->nsproxy = rootns->ns;
+		return 0;
+	}
 	if (likely(!(flags & (CLONE_NS_ALL & ~CLONE_NEWUSER)))) {
 		if ((flags & CLONE_VM) ||
 		    likely(old_ns->time_ns_for_children == old_ns->time_ns)) {
@@ -197,7 +206,7 @@ int copy_namespaces(u64 flags, struct task_struct *tsk)
 		(CLONE_NEWIPC | CLONE_SYSVSEM))
 		return -EINVAL;
 
-	new_ns = create_new_namespaces(flags, tsk->nsproxy, user_ns, tsk->fs);
+	new_ns = create_new_namespaces(flags, old_ns, user_ns, tsk->fs);
 	if (IS_ERR(new_ns))
 		return  PTR_ERR(new_ns);
 
@@ -226,7 +235,6 @@ int unshare_nsproxy_namespaces(unsigned long unshare_flags,
 	user_ns = new_cred ? new_cred->user_ns : current_user_ns();
 	if (!ns_capable(user_ns, CAP_SYS_ADMIN))
 		return -EPERM;
-
 	/*
 	 * Convert the 32-bit UNSHARE_EMPTY_MNTNS (which aliases
 	 * CLONE_PARENT_SETTID) to the unique 64-bit CLONE_EMPTY_MNTNS.
@@ -360,6 +368,11 @@ static int prepare_nsset(unsigned flags, struct nsset *nsset)
 {
 	struct task_struct *me = current;
 
+#ifdef CONFIG_ROOTNS
+	if (me->nsproxy->rootns != &init_rootns)
+		return -EPERM;
+#endif
+
 	nsset->nsproxy = create_new_namespaces(0, me->nsproxy, current_user_ns(), me->fs);
 	if (IS_ERR(nsset->nsproxy))
 		return PTR_ERR(nsset->nsproxy);
@@ -390,6 +403,9 @@ out:
 
 static inline int validate_ns(struct nsset *nsset, struct ns_common *ns)
 {
+	if (!rootns_may_setns(current->nsproxy->rootns, ns))
+		return -EPERM;
+
 	return ns->ops->install(nsset, ns);
 }
 

@@ -105,6 +105,7 @@ extern const struct proc_ns_operations utsns_operations;
  * @stashed: cached dentry to be used by the vfs
  * @ops: namespace operations
  * @inum: namespace inode number (quickly recycled for non-initial namespaces)
+ * @rootns_id: rootns provenance tag, if the namespace was created by a rootns
  * @__ns_ref: main reference count (do not use directly)
  * @ns_tree: namespace tree nodes and active reference count
  */
@@ -116,6 +117,9 @@ struct ns_common {
 	struct dentry *stashed;
 	const struct proc_ns_operations *ops;
 	unsigned int inum;
+#ifdef CONFIG_ROOTNS
+	u64 rootns_id;
+#endif
 	union {
 		struct ns_tree;
 		struct rcu_head ns_rcu;

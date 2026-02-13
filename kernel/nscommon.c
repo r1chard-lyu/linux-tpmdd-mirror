@@ -62,6 +62,9 @@ int __ns_common_init(struct ns_common *ns, u32 ns_type, const struct proc_ns_ope
 	ns->ops = ops;
 	ns->ns_id = 0;
 	ns->ns_type = ns_type;
+#ifdef CONFIG_ROOTNS
+	ns->rootns_id = 0;
+#endif
 	ns_tree_node_init(&ns->ns_tree_node);
 	ns_tree_node_init(&ns->ns_unified_node);
 	ns_tree_node_init(&ns->ns_owner_node);

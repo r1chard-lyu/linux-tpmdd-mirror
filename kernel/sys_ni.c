@@ -400,3 +400,4 @@ COND_SYSCALL(rootns_create);
 COND_SYSCALL(rootns_wait);
 COND_SYSCALL_COMPAT(rootns_wait);
 COND_SYSCALL(rootns_kill);
+COND_SYSCALL(rootns_enter);
