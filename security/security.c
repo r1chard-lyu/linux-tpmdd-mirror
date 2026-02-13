@@ -29,6 +29,7 @@
 #include <linux/overflow.h>
 #include <linux/perf_event.h>
 #include <linux/fs.h>
+#include <linux/rootns.h>
 #include <net/flow.h>
 #include <net/sock.h>
 
@@ -5716,3 +5717,29 @@ void security_initramfs_populated(void)
 {
 	call_void_hook(initramfs_populated);
 }
+
+#ifdef CONFIG_ROOTNS
+/**
+ * security_rootns_alloc() - Check creation of a new rootns
+ * @rootns: The new rootns
+ * @flags: Creation flags
+ *
+ * Check if a new rootns may be created and, if so, assign security data.
+ *
+ * Return: 0 on success, negative errno on failure.
+ */
+int security_rootns_alloc(struct rootns *rootns, unsigned int flags)
+{
+	return call_int_hook(rootns_alloc, rootns, flags);
+}
+
+/**
+ * security_rootns_free() - Free security data attached to a rootns
+ * @rootns: The rootns.
+ */
+void security_rootns_free(struct rootns *rootns)
+{
+	call_void_hook(rootns_free, rootns);
+}
+
+#endif /* CONFIG_ROOTNS */

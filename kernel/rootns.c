@@ -133,6 +133,7 @@ void put_rootns(struct rootns *c)
 	if (c->cred)
 		put_cred(c->cred);
 	cleanup_srcu_struct(&c->member_srcu);
+	security_rootns_free(c);
 	kfree(c);
 }
 
@@ -432,6 +433,9 @@ static struct rootns *create_rootns(unsigned int flags)
 
 	nsproxy_ns_active_get(ns);
 
+	ret = security_rootns_alloc(c, flags);
+	if (ret < 0)
+		goto err_fs;
 	return c;
 
 err_fs:
