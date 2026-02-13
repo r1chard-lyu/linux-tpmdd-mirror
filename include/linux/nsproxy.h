@@ -91,6 +91,9 @@ static inline struct cred *nsset_cred(struct nsset *set)
  *         * /
  *     task_unlock(task);
  *
+ *  4. Root namespaces are set at rootns creation and cannot be
+ *     changed.
+ *
  */
 
 struct nsproxy *create_new_namespaces(u64 flags,

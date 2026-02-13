@@ -1450,6 +1450,15 @@ config NET_NS
 	  Allow user space to create what appear to be multiple instances
 	  of the network stack.
 
+config ROOTNS
+	bool "Root namespace"
+	depends on USER_NS && PID_NS && UTS_NS && IPC_NS && NET_NS && CGROUPS
+	default y
+	help
+	  Allow container to create and manipulate a namespace containing an
+	  isolated process and namespace hierarchy. Containers are managed with
+	  rootns_* system calls.
+
 endif # NAMESPACES
 
 config CHECKPOINT_RESTORE
