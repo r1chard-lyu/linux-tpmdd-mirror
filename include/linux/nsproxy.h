@@ -94,7 +94,7 @@ static inline struct cred *nsset_cred(struct nsset *set)
  */
 
 struct nsproxy *create_new_namespaces(u64 flags,
-				      struct task_struct *tsk,
+				      struct nsproxy *ns,
 				      struct user_namespace *user_ns,
 				      struct fs_struct *new_fs);
 int copy_namespaces(u64 flags, struct task_struct *tsk);
