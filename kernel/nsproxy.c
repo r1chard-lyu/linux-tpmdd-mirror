@@ -13,6 +13,7 @@
 #include <linux/export.h>
 #include <linux/nsproxy.h>
 #include <linux/ns/ns_common_types.h>
+#include <linux/rootns.h>
 #include <linux/init_task.h>
 #include <linux/mnt_namespace.h>
 #include <linux/utsname.h>
@@ -48,6 +49,9 @@ struct nsproxy init_nsproxy = {
 #ifdef CONFIG_TIME_NS
 	.time_ns		= &init_time_ns,
 	.time_ns_for_children	= &init_time_ns,
+#endif
+#ifdef CONFIG_ROOTNS
+	.rootns		= &init_rootns,
 #endif
 };
 
@@ -142,6 +146,7 @@ struct nsproxy *create_new_namespaces(u64 flags,
 		goto out_time;
 	}
 	new_nsp->time_ns = get_time_ns(ns->time_ns);
+	new_nsp->rootns = ns->rootns;
 
 	return new_nsp;
 

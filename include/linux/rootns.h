@@ -53,9 +53,14 @@ struct rootns {
 };
 
 #ifdef CONFIG_ROOTNS
+extern struct rootns init_rootns;
+
 struct rootns *get_rootns(struct rootns *c);
 void put_rootns(struct rootns *c);
 bool is_rootns_file(struct file *file);
+int copy_rootns(unsigned long flags, struct task_struct *tsk,
+		struct rootns *rootns);
+void exit_rootns(struct task_struct *tsk);
 #else
 static inline struct rootns *get_rootns(struct rootns *c)
 {
@@ -69,6 +74,16 @@ static inline void put_rootns(struct rootns *c)
 static inline bool is_rootns_file(struct file *file)
 {
 	return false;
+}
+
+static inline int copy_rootns(unsigned long flags, struct task_struct *tsk,
+			      struct rootns *rootns)
+{
+	return 0;
+}
+
+static inline void exit_rootns(struct task_struct *tsk)
+{
 }
 #endif /* CONFIG_ROOTNS */
 

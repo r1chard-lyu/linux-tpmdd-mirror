@@ -22,10 +22,24 @@
 #include <linux/nsfs.h>
 #include <linux/pid.h>
 #include <linux/compat.h>
+#include <linux/rculist.h>
 #include <uapi/linux/rootns.h>
 
 #undef pr_fmt
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+
+struct rootns init_rootns = {
+	.usage		= REFCOUNT_INIT(2),
+	.cred		= NULL,
+	.ns		= &init_nsproxy,
+	.init		= &init_task,
+	.pid_ns		= &init_pid_ns,
+	.members	= LIST_HEAD_INIT(init_rootns.members),
+	.flags		= 0,
+	.fs_ready	= true,
+	.state		= ROOTNS_RUNNING,
+	.members_lock	= __SPIN_LOCK_UNLOCKED(init_rootns.members_lock),
+};
 
 /*
  * Get a reference to a rootns.
@@ -121,4 +135,114 @@ static const struct file_operations rootns_fops = {
 bool is_rootns_file(struct file *file)
 {
 	return file->f_op == &rootns_fops;
+}
+
+/*
+ * Attach a child task as a member of the inherited rootns. The first entering
+ * task sets ROOTNS_FORKING.
+ */
+int copy_rootns(unsigned long flags, struct task_struct *tsk,
+		struct rootns *rootns)
+{
+	struct nsproxy *ns = tsk->nsproxy;
+	struct rootns *c = rootns;
+	bool admitted = false;
+	int ret = -ECANCELED;
+
+	if (!rootns && ns)
+		c = ns->rootns;
+	if (!c)
+		return rootns ? ret : 0;
+	if (!rootns && c == &init_rootns)
+		return 0;
+	if (unlikely(!c->ns))
+		return rootns ? -EOPNOTSUPP : 0;
+
+	spin_lock(&c->members_lock);
+
+	if (c->state == ROOTNS_DEAD && rootns)
+		ret = -ESRCH;
+
+	if (c->state != ROOTNS_DEAD) {
+		if (!rootns) {
+			admitted = true;
+		} else if (c->state == ROOTNS_RUNNING) {
+			admitted = true;
+		} else if (c->state == ROOTNS_NEW) {
+			c->state = ROOTNS_FORKING;
+			admitted = true;
+		}
+	}
+
+	if (admitted) {
+		get_task_struct(tsk);
+		list_add_tail_rcu(&tsk->rootns_member, &c->members);
+		get_rootns(c);
+		ret = 0;
+	}
+
+	spin_unlock(&c->members_lock);
+	return ret;
+}
+
+/*
+ * Remove an exiting process from a rootns.
+ *
+ * If the rootns init process exits, signal all remaining rootns members for
+ * termination.
+ */
+void exit_rootns(struct task_struct *tsk)
+{
+	bool init_exited = false;
+	struct rootns *c;
+	struct nsproxy *ns = tsk->nsproxy;
+	struct task_struct *p;
+	struct kernel_siginfo si = {
+		.si_signo = SIGKILL,
+		.si_code  = SI_KERNEL,
+	};
+
+	if (!ns)
+		return;
+
+	c = ns->rootns;
+	if (!c)
+		return;
+	if (c == &init_rootns)
+		return;
+	if (unlikely(!c->ns))
+		return;
+
+	spin_lock(&c->members_lock);
+	list_del_rcu(&tsk->rootns_member);
+
+	if (c->init == tsk) {
+		init_exited = true;
+		c->init = NULL;
+		c->exit_code = tsk->exit_code;
+		getrusage(tsk, RUSAGE_BOTH, &c->rusage);
+		smp_wmb(); /* Order exit_code vs ROOTNS_DEAD. */
+		WRITE_ONCE(c->state, ROOTNS_DEAD);
+	} else if (c->state == ROOTNS_FORKING &&
+		   list_empty(&c->members)) {
+		c->state = ROOTNS_NEW;
+	}
+
+	spin_unlock(&c->members_lock);
+	synchronize_srcu(&c->member_srcu);
+	put_task_struct(tsk);
+
+	if (init_exited) {
+		int idx;
+
+		wake_up_poll(&c->waitq, EPOLLHUP);
+		idx = srcu_read_lock(&c->member_srcu);
+		list_for_each_entry_srcu(p, &c->members, rootns_member,
+					 srcu_read_lock_held(&c->member_srcu)) {
+			send_sig_info(SIGKILL, &si, p);
+		}
+		srcu_read_unlock(&c->member_srcu, idx);
+	}
+
+	put_rootns(c);
 }

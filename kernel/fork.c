@@ -82,6 +82,8 @@
 #include <linux/fs_struct.h>
 #include <linux/magic.h>
 #include <linux/perf_event.h>
+#include <linux/pid_namespace.h>
+#include <linux/rootns.h>
 #include <linux/posix-timers.h>
 #include <linux/user-return-notifier.h>
 #include <linux/oom.h>
@@ -2267,9 +2269,12 @@ __latent_entropy struct task_struct *copy_process(
 	retval = copy_namespaces(clone_flags, p);
 	if (retval)
 		goto bad_fork_cleanup_mm;
-	retval = copy_io(clone_flags, p);
+	retval = copy_rootns(clone_flags, p, NULL);
 	if (retval)
 		goto bad_fork_cleanup_namespaces;
+	retval = copy_io(clone_flags, p);
+	if (retval)
+		goto bad_fork_cleanup_rootns;
 	retval = copy_thread(p, args);
 	if (retval)
 		goto bad_fork_cleanup_io;
@@ -2552,6 +2557,8 @@ bad_fork_cleanup_thread:
 bad_fork_cleanup_io:
 	if (p->io_context)
 		exit_io_context(p);
+bad_fork_cleanup_rootns:
+	exit_rootns(p);
 bad_fork_cleanup_namespaces:
 	exit_nsproxy_namespaces(p);
 bad_fork_cleanup_mm:

@@ -1192,6 +1192,7 @@ struct task_struct {
 
 	/* Namespaces: */
 	struct nsproxy			*nsproxy;
+	struct list_head		rootns_member;
 
 	/* Signal handlers: */
 	struct signal_struct		*signal;

@@ -34,6 +34,7 @@
 #include <linux/mnt_idmapping.h>
 #include <linux/pidfs.h>
 #include <linux/nstree.h>
+#include <linux/rootns.h>
 
 #include "pnode.h"
 #include "internal.h"
@@ -6226,6 +6227,23 @@ static void __init init_mount_tree(void)
 	root.dentry	= mnt->mnt_root;
 	set_fs_pwd(current->fs, &root);
 	set_fs_root(current->fs, &root);
+
+#ifdef CONFIG_ROOTNS
+	int ret;
+
+	list_add_tail(&init_task.rootns_member, &init_rootns.members);
+	init_rootns.cred = kernel_cred();
+	path_get(&root);
+	init_rootns.root = root;
+	ret = init_srcu_struct(&init_rootns.member_srcu);
+	if (ret) {
+		path_put(&init_rootns.root);
+		init_rootns.root = (struct path){};
+		init_rootns.cred = NULL;
+		init_rootns.ns = NULL;
+		pr_err("rootns: failed to initialize init SRCU: %d\n", ret);
+	}
+#endif
 
 	ns_tree_add(&init_mnt_ns);
 }
