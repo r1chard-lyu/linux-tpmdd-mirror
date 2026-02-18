@@ -2666,6 +2666,34 @@ struct task_struct *create_io_thread(int (*fn)(void *), void *arg, int node)
 	return copy_process(NULL, 0, node, &args);
 }
 
+#ifdef CONFIG_ROOTNS
+/*
+ * Commit rootns init after kernel_clone() has succeeded.
+ *
+ * Keep this separate from copy_rootns() so failed forks can clear
+ * ROOTNS_FORKING without publishing init state.
+ */
+static void rootns_set_init(struct task_struct *tsk)
+{
+	struct nsproxy *ns = tsk->nsproxy;
+	struct rootns *c;
+
+	if (!ns)
+		return;
+
+	c = ns->rootns;
+	if (!c)
+		return;
+
+	spin_lock(&c->members_lock);
+	if (c->state == ROOTNS_FORKING) {
+		c->state = ROOTNS_RUNNING;
+		c->init = tsk;
+		c->init_pid = get_task_pid(tsk, PIDTYPE_TGID);
+	}
+	spin_unlock(&c->members_lock);
+}
+#endif /* CONFIG_ROOTNS */
 /*
  *  Ok, this is the main fork-routine.
  *

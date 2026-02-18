@@ -246,3 +246,161 @@ void exit_rootns(struct task_struct *tsk)
 
 	put_rootns(c);
 }
+
+/*
+ * Create credentials for a rootns. Drop keyrings from the new credential to
+ * avoid unnecessary pinning. LSM auditing runs in security_rootns_alloc().
+ */
+static const struct cred *create_rootns_creds(unsigned int flags)
+{
+	struct cred *new;
+	int ret;
+
+	new = prepare_creds();
+	if (!new)
+		return ERR_PTR(-ENOMEM);
+
+#ifdef CONFIG_KEYS
+	key_put(new->thread_keyring);
+	new->thread_keyring = NULL;
+	key_put(new->process_keyring);
+	new->process_keyring = NULL;
+	key_put(new->session_keyring);
+	new->session_keyring = NULL;
+	key_put(new->request_key_auth);
+	new->request_key_auth = NULL;
+#endif
+	if (!(flags & ROOTNS_USER))
+		return new;
+
+	ret = create_user_ns(new);
+	if (ret < 0)
+		goto err;
+	new->euid = new->user_ns->owner;
+	new->egid = new->user_ns->group;
+
+	new->uid = new->euid;
+	new->suid = new->euid;
+	new->fsuid = new->euid;
+	new->gid = new->egid;
+	new->sgid = new->egid;
+	new->fsgid = new->egid;
+	ret = set_cred_ucounts(new);
+	if (ret < 0)
+		goto err;
+	return new;
+
+err:
+	abort_creds(new);
+	return ERR_PTR(ret);
+}
+
+/*
+ * Create a new rootns.
+ */
+static struct rootns *create_rootns(unsigned int flags)
+{
+	const struct cred *cred;
+	struct rootns *c;
+	struct fs_struct *fs;
+	struct nsproxy *ns;
+	unsigned int clone_flags = 0;
+	int ret;
+
+	c = kzalloc_obj(*c, GFP_KERNEL);
+	if (!c)
+		return ERR_PTR(-ENOMEM);
+
+	INIT_LIST_HEAD(&c->members);
+	init_waitqueue_head(&c->waitq);
+	spin_lock_init(&c->members_lock);
+	refcount_set(&c->usage, 1);
+	ret = init_srcu_struct(&c->member_srcu);
+	if (ret)
+		goto err_free_cont;
+
+	c->flags = flags;
+	c->fs_ready = false;
+
+	cred = create_rootns_creds(flags);
+	if (IS_ERR(cred)) {
+		ret = PTR_ERR(cred);
+		goto err_cont;
+	}
+	c->cred = cred;
+
+	ret = -ENOMEM;
+	fs = copy_fs_struct(current->fs);
+	if (!fs)
+		goto err_cont;
+
+	if (flags & ROOTNS_CGROUP)
+		clone_flags |= CLONE_NEWCGROUP;
+	if (flags & ROOTNS_UTS)
+		clone_flags |= CLONE_NEWUTS;
+	if (flags & ROOTNS_IPC)
+		clone_flags |= CLONE_NEWIPC;
+	if (flags & ROOTNS_PID)
+		clone_flags |= CLONE_NEWPID;
+	if (flags & ROOTNS_NET)
+		clone_flags |= CLONE_NEWNET;
+
+	ret = -EPERM;
+	if (!ns_capable(cred->user_ns, CAP_SYS_ADMIN))
+		goto err_fs;
+
+	ns = create_new_namespaces(clone_flags, current->nsproxy, cred->user_ns, fs);
+	if (IS_ERR(ns)) {
+		ret = PTR_ERR(ns);
+		goto err_fs;
+	}
+
+	c->ns = ns;
+	ns->rootns = c;
+	c->pid_ns = get_pid_ns(c->ns->pid_ns_for_children);
+	c->root = fs->root;
+	fs->root = (struct path){};
+	free_fs_struct(fs);
+	fs = NULL;
+
+	nsproxy_ns_active_get(ns);
+
+	return c;
+
+err_fs:
+	if (fs)
+		free_fs_struct(fs);
+
+err_cont:
+	put_rootns(c);
+	return ERR_PTR(ret);
+err_free_cont:
+	kfree(c);
+	return ERR_PTR(ret);
+}
+
+/*
+ * Create a new rootns object.
+ */
+SYSCALL_DEFINE1(rootns_create, unsigned int, flags)
+{
+	struct rootns *c;
+	int fd;
+
+	if (flags & ~ROOTNS_ALL_FLAGS)
+		return -EINVAL;
+	if (unlikely(!current->nsproxy->rootns ||
+		     !current->nsproxy->rootns->ns))
+		return -EOPNOTSUPP;
+
+	c = create_rootns(flags);
+	if (IS_ERR(c))
+		return PTR_ERR(c);
+
+	fd = anon_inode_getfd("rootns", &rootns_fops, c,
+			      O_RDWR | (flags & ROOTNS_CLOSE_ON_EXEC ? O_CLOEXEC : 0));
+	if (fd < 0)
+		put_rootns(c);
+
+	return fd;
+}
