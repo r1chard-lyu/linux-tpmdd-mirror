@@ -504,3 +504,76 @@ COMPAT_SYSCALL_DEFINE4(rootns_wait, int, rootnsfd,
 	return ret;
 }
 #endif
+
+static int contain_kill_members(struct rootns *rootns, int sig)
+{
+	int err;
+	int idx;
+	int ret = 0;
+	struct pid *pid;
+	int other_err = 0;
+	bool any_perm = false;
+	bool any_other = false;
+	bool any_success = false;
+	struct task_struct *p;
+
+	idx = srcu_read_lock(&rootns->member_srcu);
+	list_for_each_entry_srcu(p, &rootns->members, rootns_member,
+				 srcu_read_lock_held(&rootns->member_srcu)) {
+		pid = task_pid_type(p, PIDTYPE_TGID);
+		if (!pid)
+			continue;
+
+		err = kill_pid(pid, sig, 0);
+
+		if (!err) {
+			any_success = true;
+		} else if (err == -EPERM) {
+			any_perm = true;
+		} else if (err != -ESRCH && !any_other) {
+			any_other = true;
+			other_err = err;
+		}
+	}
+	srcu_read_unlock(&rootns->member_srcu, idx);
+
+	if (any_success)
+		ret = 0;
+	else if (any_other)
+		ret = other_err;
+	else if (any_perm)
+		ret = -EPERM;
+	else
+		ret = -ESRCH;
+
+	return ret;
+}
+
+/*
+ * Send a signal to all current rootns members.
+ */
+SYSCALL_DEFINE2(rootns_kill, int, rootnsfd, int, sig)
+{
+	int ret = 0;
+	struct rootns *rootns;
+	struct fd f = fdget(rootnsfd);
+
+	if (fd_empty(f))
+		return -EBADF;
+	ret = -EINVAL;
+	if (!is_rootns_file(fd_file(f)))
+		goto out;
+
+	rootns = fd_file(f)->private_data;
+	if (!valid_signal(sig)) {
+		ret = -EINVAL;
+		goto out;
+	}
+
+	ret = contain_kill_members(rootns, sig);
+	goto out;
+
+out:
+	fdput(f);
+	return ret;
+}

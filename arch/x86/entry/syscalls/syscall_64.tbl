@@ -398,6 +398,7 @@
 471	common	rseq_slice_yield	sys_rseq_slice_yield
 472	common	rootns_create		sys_rootns_create
 473	common	rootns_wait		sys_rootns_wait
+474	common	rootns_kill		sys_rootns_kill
 
 #
 # Due to a historical design error, certain syscalls are numbered differently
